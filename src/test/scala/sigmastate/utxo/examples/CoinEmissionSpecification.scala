@@ -118,7 +118,7 @@ class CoinEmissionSpecification extends SigmaTestingCommons with ScorexLogging {
     val minerPubkey = minerImage.pkBytes
     val minerProp = minerImage
 
-    val initialBoxCandidate: ErgoBox = ErgoBox(coinsTotal, prop, 0, Seq(), Map(register -> LongConstant(0)))
+    val initialBoxCandidate: ErgoBox = ErgoBox(coinsTotal, prop, 0, Seq(), Map(register -> LongConstant(-1)))
     val initBlock = BlockchainSimulationSpecification.Block(
       IndexedSeq(
         ErgoLikeTransaction(
