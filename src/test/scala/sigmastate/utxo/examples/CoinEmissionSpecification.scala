@@ -1,10 +1,13 @@
 package sigmastate.utxo.examples
 
+import java.lang.reflect.Method
+
 import org.ergoplatform.{ErgoLikeContext, Height, _}
+import scapi.sigma.DLogProtocol.ProveDlog
 import scorex.util.ScorexLogging
 import sigmastate.Values.{IntConstant, LongConstant, SValue}
 import sigmastate.Values.{ConcreteCollection, IntConstant, LongConstant}
-import sigmastate.eval.RuntimeIRContext
+import sigmastate.eval.{CompiletimeCosting, IRContext, RuntimeIRContext}
 import sigmastate.helpers.{ErgoLikeTestProvingInterpreter, SigmaTestingCommons}
 import sigmastate.interpreter.{ContextExtension, ProverResult}
 import sigmastate.interpreter.Interpreter.{ScriptEnv, ScriptNameProp, emptyEnv}
@@ -20,13 +23,21 @@ import sigmastate.{SLong, _}
   * that controls emission rules
   */
 class CoinEmissionSpecification extends SigmaTestingCommons with ScorexLogging {
-  implicit lazy val IR = new RuntimeIRContext()
 //  implicit lazy val IR = new TestingIRContext {
 //    override val okPrintEvaluatedEntries: Boolean = false
 //    // overrided to avoid outputing intermediate graphs in files (too many of them)
 //    override def onCostingResult[T](env: ScriptEnv, tree: SValue, res: CostingResult[T]): Unit = {
 //    }
 //  }
+
+  // todo: add mix in CompiletimeCosting to fix the issue
+  class FullRuntimeIRContext extends IRContext {
+    override def invokeAll: Boolean = true
+    override def isInvokeEnabled(d: Def[_], m: Method): Boolean = invokeAll
+    override def shouldUnpack(e: Elem[_]): Boolean = true
+  }
+
+  implicit lazy val IR = new FullRuntimeIRContext()
 
   private val reg1 = ErgoBox.nonMandatoryRegisters.head
 
@@ -167,6 +178,8 @@ class CoinEmissionSpecification extends SigmaTestingCommons with ScorexLogging {
       val costTry = verifier.verify(prop, context, noproof, ut.messageToSign)
       costTry.recover { case t => t.printStackTrace() }
       costTry.get._1 shouldBe true
+      val proverResultMinerBox = prover.prove(minerProp, context, ut.messageToSign).get
+      proverResultMinerBox.cost > 0 shouldBe true
       val proverResult = prover.prove(emptyEnv + (ScriptNameProp -> "prove"), prop, context, ut.messageToSign).get
       ut.toSigned(IndexedSeq(proverResult))
     }
