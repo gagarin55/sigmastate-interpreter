@@ -1,13 +1,13 @@
 package sigmastate.utxo.examples
 
+import org.ergoplatform.ErgoBox.R4
 import org.ergoplatform._
 import scorex.crypto.hash.Blake2b256
 import sigmastate.SCollection.SByteArray
-import sigmastate.Values.{LongConstant, SigmaPropConstant, Value, ByteArrayConstant, IntConstant}
+import sigmastate.Values.{ByteArrayConstant, IntConstant, LongConstant, ShortConstant, Value}
 import sigmastate._
 import sigmastate.helpers.{ErgoLikeTestProvingInterpreter, SigmaTestingCommons}
-import sigmastate.interpreter.Interpreter.{ScriptNameProp, emptyEnv}
-import sigmastate.utxo._
+import sigmastate.interpreter.ContextExtension
 import sigmastate.lang.Terms._
 import sigmastate.utxo._
 
@@ -35,8 +35,12 @@ import sigmastate.utxo._
   * //todo: make an example of multiple orders being matched
   */
 class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
-  implicit lazy val IR = new TestingIRContext
 
+  implicit lazy val IR: TestingIRContext = new TestingIRContext
+
+  /**
+    * A simpler example with single-chain atomic exchange contracts.
+    */
   property("atomic exchange") {
     val tokenBuyer = new ErgoLikeTestProvingInterpreter
     val tokenSeller = new ErgoLikeTestProvingInterpreter
@@ -46,9 +50,6 @@ class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
     val deadline = 70L
     val tokenBuyerKey = tokenBuyer.dlogSecrets.head.publicImage
     val tokenSellerKey = tokenBuyer.dlogSecrets.head.publicImage
-
-    val buyerKeyBytes = tokenBuyerKey.bytes
-    val sellerKeyBytes = tokenSellerKey.bytes
 
     def extractToken(box: Value[SBox.type]) = ByIndex(
       ExtractRegisterAs(box, ErgoBox.TokensRegId)(ErgoBox.STokensRegType).get, 0)
@@ -75,11 +76,7 @@ class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
       )
     )
 
-    //    val x = OR(ConcreteCollection(Vector(AND(ConcreteCollection(Vector(GT(Height, Constant(70, SLong)), ProveDlog(Constant((???, ???, ???, ???), SGroupElement))), SBoolean)), AND(ConcreteCollection(Vector(EQ(SelectField(Apply(ExtractRegisterAs(ByIndex(Outputs, Constant(0, SInt), None), R2, Array[(Array[SByte], SLong)], None), Vector(Constant(0, SInt))), 1), Constant(???, Array[SByte])), GE(SelectField(Apply(ExtractRegisterAs(ByIndex(Outputs, Constant(0, SInt), None), R2, Array[(Array[SByte], SLong)], None), Vector(Constant(0, SInt))), 2), Constant(60, SLong)), EQ(ExtractScriptBytes(ByIndex(Outputs, Constant(0, SInt), None)), Constant(???, Array[SByte])), GE(ExtractAmount(ByIndex(Outputs, Constant(0, SInt), None)), Constant(1, SLong))), SBoolean))), SBoolean))
-
-    val buyerEnv = Map(
-      ScriptNameProp -> "buyer",
-      "pkA" -> tokenBuyerKey, "deadline" -> deadline, "token1" -> tokenId)
+    val buyerEnv = Map("pkA" -> tokenBuyerKey, "deadline" -> deadline, "token1" -> tokenId)
     val altBuyerProp = compile(buyerEnv,
       """(HEIGHT > deadline && pkA) || {
         |  val tokenData = OUTPUTS(0).R2[Col[(Col[Byte], Long)]].get(0)
@@ -100,9 +97,7 @@ class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
         rightProtectionSeller
       )
     )
-    val sellerEnv = Map(
-      ScriptNameProp -> "seller",
-      "pkB" -> tokenSellerKey, "deadline" -> deadline)
+    val sellerEnv = Map("pkB" -> tokenSellerKey, "deadline" -> deadline)
     val altSellerProp = compile(sellerEnv,
       """ (HEIGHT > deadline && pkB) ||
         | allOf(Col(
@@ -111,15 +106,16 @@ class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
         | ))
       """.stripMargin).asBoolValue
 
-    altSellerProp shouldBe sellerProp
+    sellerProp shouldBe altSellerProp
 
-    val newBox1 = ErgoBox(1, tokenBuyerKey, 0, Seq(tokenId -> 60))
-    val newBox2 = ErgoBox(100, tokenSellerKey, 0)
+    //tx inputs
+    val input0 = ErgoBox(100, buyerProp, 0)
+    val input1 = ErgoBox(1, sellerProp, 0, Seq(tokenId -> 60))
+
+    //tx outputs
+    val newBox1 = ErgoBox(1, tokenBuyerKey, 0, Seq(tokenId -> 60), Map(R4 -> ByteArrayConstant(input0.id)))
+    val newBox2 = ErgoBox(100, tokenSellerKey, 0, Seq(), Map(R4 -> ByteArrayConstant(input1.id)))
     val newBoxes = IndexedSeq(newBox1, newBox2)
-
-    val input1 = ErgoBox(100, buyerProp, 0)
-
-    val input2 = ErgoBox(1, sellerProp, 0, Seq(tokenId -> 60))
 
     val spendingTransaction = ErgoLikeTransaction(IndexedSeq(), newBoxes)
 
@@ -127,24 +123,202 @@ class AssetsAtomicExchangeSpecification extends SigmaTestingCommons {
       currentHeight = 50,
       lastBlockUtxoRoot = AvlTreeData.dummy,
       minerPubkey = ErgoLikeContext.dummyPubkey,
-      boxesToSpend = IndexedSeq(input1, input2),
+      boxesToSpend = IndexedSeq(input0, input1),
       spendingTransaction,
-      self = input1)
+      self = input0
+    )
 
     //Though we use separate provers below, both inputs do not contain any secrets, thus
     //a spending transaction could be created and posted by anyone.
-    val pr = tokenBuyer.prove(emptyEnv + (ScriptNameProp -> "tokenBuyer_prove"), buyerProp, buyerCtx, fakeMessage).get
-    verifier.verify(emptyEnv + (ScriptNameProp -> "tokenBuyer_verify"), buyerProp, buyerCtx, pr, fakeMessage).get._1 shouldBe true
+    val pr = tokenBuyer.prove(buyerProp, buyerCtx, fakeMessage).get
+    verifier.verify(buyerProp, buyerCtx, pr, fakeMessage).get._1 shouldBe true
 
     val sellerCtx = ErgoLikeContext(
       currentHeight = 50,
       lastBlockUtxoRoot = AvlTreeData.dummy,
       minerPubkey = ErgoLikeContext.dummyPubkey,
-      boxesToSpend = IndexedSeq(input1, input2),
+      boxesToSpend = IndexedSeq(input0, input1),
       spendingTransaction,
-      self = input2)
+      self = input1
+    )
 
     val pr2 = tokenSeller.prove(sellerProp, sellerCtx, fakeMessage).get
+
+    // All requirements satisfied
     verifier.verify(sellerProp, sellerCtx, pr2, fakeMessage).get._1 shouldBe true
+
+    val newBox1Invalid = ErgoBox(1, tokenBuyerKey, 0, Seq(tokenId -> 59), Map(R4 -> ByteArrayConstant(input0.id)))
+    val newBox2Invalid = ErgoBox(99, tokenSellerKey, 0, Seq(), Map(R4 -> ByteArrayConstant(input1.id)))
+    val newBoxesInvalid = IndexedSeq(newBox1Invalid, newBox2Invalid)
+
+    val spendingTransactionInvalid = ErgoLikeTransaction(IndexedSeq(), newBoxesInvalid)
+
+    val invalidCtxBuyer = ErgoLikeContext(
+      currentHeight = 50,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = IndexedSeq(input0, input1),
+      spendingTransactionInvalid,
+      self = input0
+    )
+
+    // Does not satisfy requirement `tokenData._2 >= 60L` in buyer's script.
+    verifier.verify(buyerProp, invalidCtxBuyer, pr2, fakeMessage).get._1 shouldBe false
+
+    val invalidCtxSeller = ErgoLikeContext(
+      currentHeight = 50,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = IndexedSeq(input0, input1),
+      spendingTransactionInvalid,
+      self = input0
+    )
+
+    // Does not satisfy requirement `tokenData._2 >= 60L` in buyer's script.
+    verifier.verify(sellerProp, invalidCtxSeller, pr2, fakeMessage).get._1 shouldBe false
   }
+
+  /**
+    * An example with order contracts which could be only partially filled
+    */
+  property("partial filling") {
+    val tokenBuyer = new ErgoLikeTestProvingInterpreter
+    val tokenSeller = new ErgoLikeTestProvingInterpreter
+    val verifier = new ErgoLikeTestInterpreter
+
+    val tokenId = Blake2b256("token1")
+    val deadline = 70L
+    val tokenBuyerKey = tokenBuyer.dlogSecrets.head.publicImage
+    val tokenSellerKey = tokenBuyer.dlogSecrets.head.publicImage
+
+    val buyerEnv = Map("pkA" -> tokenBuyerKey, "deadline" -> deadline, "token1" -> tokenId)
+
+    //the contract assumes no tokens in the input box
+    val buyerProp = compile(buyerEnv,
+      """(HEIGHT > deadline && pkA) || {
+        |
+        |  val outIdx = getVar[Short](127).get
+        |  val out = OUTPUTS(outIdx)
+        |
+        |  val defaultTokenData = Col((Col(1.toByte), 0L))
+        |
+        |  val tokenData = out.R2[Col[(Col[Byte], Long)]].get(0)
+        |  val tokenId = tokenData._1
+        |  val tokenValue = tokenData._2
+        |  val selfTokenValue = SELF.R2[Col[(Col[Byte], Long)]].getOrElse(defaultTokenData)(0)._2
+        |  val outValue = out.value
+        |  val price = 500
+        |  val minimalRemainingAmount = 500
+        |
+        |  allOf(Col(
+        |      tokenId == token1,
+        |      tokenValue >= 1,
+        |      (SELF.value - outValue) <= (tokenValue - selfTokenValue) * price,
+        |      out.R4[Col[Byte]].get == SELF.id,
+        |      out.propositionBytes == SELF.propositionBytes ||
+        |          (outValue <= minimalRemainingAmount && out.propositionBytes == pkA.propBytes)
+        |  ))
+        |}
+      """.stripMargin).asBoolValue
+
+    val sellerEnv = Map("pkB" -> tokenSellerKey, "deadline" -> deadline)
+    val sellerProp = compile(sellerEnv,
+      """ (HEIGHT > deadline && pkB) || {
+        |   val outIdx = getVar[Short](127).get
+        |   val out = OUTPUTS(outIdx)
+        |
+        |   val defaultTokenData = Col((Col(1.toByte), 0L))
+        |
+        |   val tokenValue = out.R2[Col[(Col[Byte], Long)]].getOrElse(defaultTokenData)(0)._2
+        |   val selfTokenValue = SELF.R2[Col[(Col[Byte], Long)]].getOrElse(defaultTokenData)(0)._2
+        |
+        |   val selfValue = SELF.value
+        |   val outValue = out.value
+        |
+        |   val sold = selfTokenValue - tokenValue
+        |
+        |   val price = 495
+        |
+        |   allOf(Col(
+        |        sold >= 1,
+        |        (outValue - selfValue) >= sold * price,
+        |        out.R4[Col[Byte]].get == SELF.id,
+        |        out.propositionBytes == SELF.propositionBytes ||
+        |            (tokenValue == 0 && out.propositionBytes == pkB.propBytes)
+        |   ))
+        | }
+      """.stripMargin).asBoolValue
+
+    //tx inputs
+    val input0 = ErgoBox(10000, buyerProp, 0, Seq(tokenId -> 0))
+    val input1 = ErgoBox(0, sellerProp, 0, Seq(tokenId -> 60))
+
+    //tx outputs at 1st round
+    val buyerBoxRound1 = ErgoBox(5000, buyerProp, 0, Seq(tokenId -> 10), Map(R4 -> ByteArrayConstant(input0.id)))
+    val sellerBoxRound1 = ErgoBox(4950, sellerProp, 0, Seq(tokenId -> 50), Map(R4 -> ByteArrayConstant(input1.id)))
+    val newBoxesRound1 = IndexedSeq(buyerBoxRound1, sellerBoxRound1)
+
+    //tx outputs at 2nd round
+    val buyerBoxRound2 = ErgoBox(500, tokenBuyerKey, 1, Seq(tokenId -> 19), Map(R4 -> ByteArrayConstant(buyerBoxRound1.id)))
+    val sellerBoxRound2 = ErgoBox(29700, tokenSellerKey, 1, Seq(tokenId -> 0), Map(R4 -> ByteArrayConstant(sellerBoxRound1.id)))
+    val newBoxesRound2 = IndexedSeq(buyerBoxRound2, sellerBoxRound2)
+
+    val spendingTransactionRound1 = ErgoLikeTransaction(IndexedSeq(), newBoxesRound1)
+    val spendingTransactionRound2 = ErgoLikeTransaction(IndexedSeq(), newBoxesRound2)
+
+    val buyerCtxRound1 = ErgoLikeContext(
+      currentHeight = 50,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = IndexedSeq(input0, input1),
+      spendingTransactionRound1,
+      self = input0,
+      extension = ContextExtension(Map(Byte.MaxValue -> ShortConstant(0))))
+
+    //Though we use separate provers below, both inputs do not contain any secrets, thus
+    //a spending transaction could be created and posted by anyone.
+    val pr1R1 = tokenBuyer
+      .withContextExtender(Byte.MaxValue, ShortConstant(0)).prove(buyerProp, buyerCtxRound1, fakeMessage).get
+    verifier.verify(buyerProp, buyerCtxRound1, pr1R1, fakeMessage).get._1 shouldBe true
+
+    val sellerCtxRound1 = ErgoLikeContext(
+      currentHeight = 50,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = IndexedSeq(input0, input1),
+      spendingTransactionRound1,
+      self = input1,
+      extension = ContextExtension(Map(Byte.MaxValue -> ShortConstant(1))))
+
+    val pr2R1 = tokenSeller
+      .withContextExtender(Byte.MaxValue, ShortConstant(1)).prove(sellerProp, sellerCtxRound1, fakeMessage).get
+    verifier.verify(sellerProp, sellerCtxRound1, pr2R1, fakeMessage).get._1 shouldBe true
+
+    val buyerCtxRound2 = ErgoLikeContext(
+      currentHeight = 51,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = newBoxesRound1,
+      spendingTransactionRound2,
+      self = buyerBoxRound1,
+      extension = ContextExtension(Map(Byte.MaxValue -> ShortConstant(0))))
+
+    val pr1R2 = tokenBuyer
+      .withContextExtender(Byte.MaxValue, ShortConstant(0)).prove(buyerProp, buyerCtxRound2, fakeMessage).get
+    verifier.verify(buyerProp, buyerCtxRound2, pr1R2, fakeMessage).get._1 shouldBe true
+
+    val sellerCtxRound2 = ErgoLikeContext(
+      currentHeight = 51,
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContext.dummyPubkey,
+      boxesToSpend = newBoxesRound1,
+      spendingTransactionRound2,
+      self = sellerBoxRound1,
+      extension = ContextExtension(Map(Byte.MaxValue -> ShortConstant(1))))
+
+    val pr2R2 = tokenSeller
+      .withContextExtender(Byte.MaxValue, ShortConstant(1)).prove(sellerProp, sellerCtxRound2, fakeMessage).get
+    verifier.verify(sellerProp, sellerCtxRound2, pr2R2, fakeMessage).get._1 shouldBe true
+  }
+
 }
